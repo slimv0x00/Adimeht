@@ -374,7 +374,7 @@ class WinDbgBridge():
 		#self.dbiprintf(cmdr)
 
 
-	# returns types.NoneType on failed
+	# returns [0: addr, 1: api count], types.NoneType on failed
 	def searchIatCandidate(self, addr, size):
 		lineNumber = 0x40
 		mapSize = 0x1000
@@ -388,7 +388,7 @@ class WinDbgBridge():
 		if size <= 0:
 			self.dbiprintf("[E] Invalid dump size : 0x%08x" % size, False)
 			return types.NoneType
-		pykd.dprint("[+] Searching IAT candidates in 0x%08x ( 0x%08x )" % (addr, size))
+		self.dbiprintf("[+] Searching IAT candidates in 0x%08x ( 0x%08x )" % (addr, size))
 		dSize = size / mapSize
 		if size % mapSize != 0:
 			dSize = dSize + 1
@@ -437,9 +437,30 @@ class WinDbgBridge():
                     if maxCnt < dictCandIat[i]:
                         maxCnt = dictCandIat[i]
                         maxAddr = i
-                self.dbiprintf(" -> Probably IAT : 0x%08x" % maxAddr)
+                self.dbiprintf(" -> Longest hit : 0x%08x" % maxAddr)
 		self.dbiprintf("")
 		return [maxAddr, maxCnt]
+
+
+	# returns [0: IAT addr, 1: IAT size], types.NoneType on failed
+	def searchIatInSections(self, lSection):
+		self.dbiprintf("[+] Searching IAT in sections")
+		if len(lSection) == 0:
+			self.dbiprintf("[E] Invalid section", False)
+			return types.NoneType
+		cntIat = 0
+		for i in range(1, len(lSection)):
+			s = lSection[i]
+			candIat = self.searchIat(s[0], s[3]) # [0: VA, 3: Virtual size]
+			if cntIat < candIat[1]:
+				cntIat = candIat[1]
+				iatBase = candIat[0]
+				iatSize = (cntIat * 4) + 8
+		if cntIat == 0:
+			self.dbiprintf("[E] Cannot find IAT", False)
+			return types.NoneType
+		self.dbiprintf(" -> Probably IAT : 0x%08x ( 0x%08x ) " % (iatBase, iatSize))
+		return [iatBase, iatSize]
 
 
 	# returns file name, types.NoneType on failed
@@ -452,7 +473,7 @@ class WinDbgBridge():
 		if size <= 0:
 			self.dbiprintf("[E] Invalid dump size : 0x%08x" % size, False)
 			return types.NoneType
-		pykd.dprint("[+] Dump 0x%08x ( 0x%08x )" % (addr, size), False)
+		self.dbiprintf("[+] Dump 0x%08x ( 0x%08x )" % (addr, size), False)
 		dSize = size / mapSize
 		if size % mapSize != 0:
 			dSize = dSize + 1
