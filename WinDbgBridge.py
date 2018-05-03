@@ -272,3 +272,209 @@ class WinDbgBridge():
 			return types.NoneType
 		return lSym[0]
 
+
+	def getSectionNum(self, lSection, addr):
+		for i in range(len(lSection)):
+			if addr >= lSection[i][0] and addr < lSection[i][1]: # [0: VA, 1: VA end]
+				return i
+		return -1
+
+
+	# returns [0: type, 1: value] (type == mem: [0: type, 1: mem addr string, 2: mem element list, 3: mem formula list, 4: mem address])
+	def getOperands(self, inst):
+		operands = [] # list of operands [0: type, 1: value]
+		if len(inst.operands) > 0:
+			for op in inst.operands:
+				opInfo = []
+				if op.type == capstone.x86.X86_OP_REG:
+					#self.dbiprintf(" - REG: %s" % (inst.reg_name(op.value.reg)))
+					opInfo.append("reg")
+					opInfo.append("%s" % inst.reg_name(op.value.reg))
+				elif op.type == capstone.x86.X86_OP_IMM:
+					#self.dbiprintf(" - IMM: 0x%x" % (op.value.imm))
+					opInfo.append("imm")
+					opInfo.append(op.value.imm)
+				elif op.type == capstone.x86.X86_OP_MEM: # [0: type, 1: mem addr string, 2: mem element list, 3: mem formula list, 4: mem address]
+					strSegReg = ""
+					strBaseReg = ""
+					strIndexReg = ""
+					strScale = ""
+					strDisp = ""
+					segReg = 0
+					baseReg = 0
+					indexReg = 0
+					scale = 0
+					disp = 0
+					baseVal = 0
+					indexVal = 0
+					memList = []
+					memList.append("[")
+					if op.value.mem.segment != 0:
+						segReg = op.value.mem.segment
+						strSegReg = "%s:" % inst.reg_name(segReg)
+						memList.append("%s" % inst.reg_name(segReg))
+						memList.append(":")
+					if op.value.mem.base != 0:
+						baseReg = op.value.mem.base
+						strBaseReg = inst.reg_name(baseReg)
+						baseVal = self.getRegVal("%s" % inst.reg_name(baseReg))
+						memList.append("%s" % inst.reg_name(baseReg))
+					if op.value.mem.index != 0:
+						indexReg = op.value.mem.index
+						strIndexReg = "+%s" % inst.reg_name(indexReg)
+						indexVal = self.getRegVal("%s" % inst.reg_name(indexReg))
+						memList.append("+")
+						memList.append("%s" % inst.reg_name(indexReg))
+					if op.value.mem.scale != 0:
+						scale = op.value.mem.scale
+						if scale != 1:
+							strScale = "*0x%x" % scale
+							memList.append("*")
+							memList.append(scale)
+					if op.value.mem.disp != 0:
+						disp = op.value.mem.disp
+						if disp > 0:
+							strDisp = "+0x%x" % disp
+							memList.append("+")
+							memList.append(disp)
+						else:
+							strDisp = "-0x%x" % (-disp)
+							memList.append("-")
+							memList.append(-disp)
+					memList.append("]")
+					memAddr = baseVal + (indexVal * scale) + disp
+					#self.dbiprintf(" - MEM: [%s%s%s%s%s] = 0x%08x" % (strSegReg, strBaseReg, strIndexReg, strScale, strDisp, memAddr))
+					opInfo.append("mem")
+					opInfo.append("[%08x]" % memAddr)
+					opInfo.append([strSegReg, strBaseReg, strIndexReg, strScale, strDisp])
+					opInfo.append(memList)
+					opInfo.append(memAddr)
+				elif op.type == capstone.x86.X86_OP_FP:
+					#self.dbiprintf(" - FP: %s" % (op.value.fp))
+					opInfo.append("fp")
+					opInfo.append("%s" % op.value.fp)
+				elif op.type == capstone.x86.X86_OP_INVALID:
+					#self.dbiprintf(" - UNINIT:")
+					opInfo.append("Uninit")
+					opInfo.append("Uninit")
+				else:
+					#self.dbiprintf(" - INVALID:")
+					opInfo.append("Invalid")
+					opInfo.append("Invalid")
+				operands.append(opInfo)
+					
+		return operands
+
+
+	def vprotect(self, addr, size, guard):
+		cmdVprotect = "!sdbgext.vprotect %x %x %x"
+		cmdr = pykd.dbgCommand(cmdVprotect % (addr, size, guard))
+		#self.dbiprintf(cmdr)
+
+
+	# returns types.NoneType on failed
+	def searchIatCandidate(self, addr, size):
+		lineNumber = 0x40
+		mapSize = 0x1000
+		cmdDd = "dd %x L%x"
+		regDd = "[0-9a-fA-F]+ +[0-9a-fA-F]+ +[0-9a-fA-F]+ +[0-9a-fA-F]+ +[0-9a-fA-F]+"
+
+		dictCandIat = {}
+		baseAddr = 0
+		nullCnt = 0
+		
+		if size <= 0:
+			self.dbiprintf("[E] Invalid dump size : 0x%08x" % size, False)
+			return types.NoneType
+		pykd.dprint("[+] Searching IAT candidates in 0x%08x ( 0x%08x )" % (addr, size))
+		dSize = size / mapSize
+		if size % mapSize != 0:
+			dSize = dSize + 1
+			dSize = dSize * mapSize
+		
+		fullLoop = dSize / (lineNumber * 4)
+		ta = addr
+		for l in range(fullLoop):
+			pykd.dprint(".")
+			cmd = cmdDd % (ta, lineNumber)
+			cmdr = pykd.dbgCommand(cmd)
+			ta = ta + (lineNumber * 4)
+			
+			bl = re.findall(regDd, cmdr)
+			for i in bl:
+				rel = i.split()
+				for j in range(1, len(rel)):
+					valIn = int(rel[j], 16)
+					if valIn == 0:
+						if baseAddr != 0:
+							if nullCnt > 0:
+								nullCnt = 0
+								baseAddr = 0
+							else:
+								nullCnt = nullCnt + 1
+								dictCandIat[baseAddr] = dictCandIat[baseAddr] + 1
+						continue
+					
+					nullCnt = 0
+					sym = self.getSymbolFromAddr(valIn, True)
+					if sym != "":
+						if baseAddr == 0:
+							baseAddr = int(rel[0], 16) + ((j - 1) * 4)
+							dictCandIat[baseAddr] = 1
+						else:
+							dictCandIat[baseAddr] = dictCandIat[baseAddr] + 1
+                                
+                self.dbiprintf("")
+                maxCnt = -1
+                maxAddr = 0
+                if len(dictCandIat) == 0:
+                        return types.NoneType
+                self.dbiprintf("[+] Candidates of IAT")
+                for i in dictCandIat.keys():
+                    self.dbiprintf(" - 0x%08x : %d" % (i, dictCandIat[i]))
+                    if maxCnt < dictCandIat[i]:
+                        maxCnt = dictCandIat[i]
+                        maxAddr = i
+                self.dbiprintf(" -> Probably IAT : 0x%08x" % maxAddr)
+		self.dbiprintf("")
+		return [maxAddr, maxCnt]
+
+
+	# returns file name, types.NoneType on failed
+	def dumpMemory(self, dumpPath, addr, size):
+		lineNumber = 0x40
+		mapSize = 0x1000
+		cmdDd = "dd %x L%x"
+		regDd = "[0-9a-fA-F]+ +[0-9a-fA-F]+ +[0-9a-fA-F]+ +[0-9a-fA-F]+ +[0-9a-fA-F]+"
+		
+		if size <= 0:
+			self.dbiprintf("[E] Invalid dump size : 0x%08x" % size, False)
+			return types.NoneType
+		pykd.dprint("[+] Dump 0x%08x ( 0x%08x )" % (addr, size), False)
+		dSize = size / mapSize
+		if size % mapSize != 0:
+			dSize = dSize + 1
+		dSize = dSize * mapSize
+		fileName = "dump_0x%x (0x%x).bin" % (addr, dSize)
+		fullPath = dumpPath + fileName
+		f = open(fullPath, "wb")
+		fullLoop = dSize / (lineNumber * 4)
+		ta = addr
+		for l in range(fullLoop):
+			pykd.dprint(".")
+			cmd = cmdDd % (ta, lineNumber)
+			cmdr = pykd.dbgCommand(cmd)
+			ta = ta + (lineNumber * 4)
+			
+			bl = re.findall(regDd, cmdr)
+			for i in bl:
+				rel = i.split()
+				f.write(struct.pack("<L", int(rel[1], 16)))
+				f.write(struct.pack("<L", int(rel[2], 16)))
+				f.write(struct.pack("<L", int(rel[3], 16)))
+				f.write(struct.pack("<L", int(rel[4], 16)))	
+		self.dbiprintf("")
+		f.close()
+		self.dbiprintf(" -> %s" % fullPath, False)
+		return fileName
+
