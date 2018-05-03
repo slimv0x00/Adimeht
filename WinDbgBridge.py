@@ -1,6 +1,8 @@
 import pykd
 import types
 import re
+import capstone
+import struct
 
 class WinDbgBridge():
 
